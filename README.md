@@ -1,6 +1,6 @@
 # Temperature Sensor
 
-Temperature sensor made with the Arduino framework.
+Temperature sensor made with the Arduino framework.\
 **Note**: This project was done as a hobby and was not tested for professional use.
 
 ## Config (config.hpp)
