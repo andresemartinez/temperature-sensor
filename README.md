@@ -1,35 +1,55 @@
 # Temperature Sensor
 
-Temperature sensor made with the Arduino framework.
-**Note**: This project was done as a hobby and was not tested for professional use.
+Temperature sensor made with an ESP8266 and a DTH22 developed with the Arduino framework.\
+**Note**: This project was made as a hobby and is not tested for professional use.
 
 ## Config (config.hpp)
 
-```
-// Debug mode (enable logs).
-// Should comment this for production use.
+```c++
+// Debug mode (works with debug tools).
+// Should comment this for production.
 #define DEBUG
 
 // Serial port
 const int serial_port = 9600;
 
-// WiFi
-const char* ssid = "your_wifi_ssid";
-const char* password = "yout_wifi_password";
+// WiFi Config
+const char* wifi_ssid = "your_wifi_ssid";
+const char* wifi_password = "yout_wifi_password";
 
 // mqtt server
 const char* mqtt_server = "mqtt_server_ip";
 const int mqtt_port = 1883;
-const char* client_id = "temp_sensor_1-";
-const char* temperature_topic = "temperature";
+const uint16_t mqtt_buffer_size = 1024; // In bytes
+const char* mqtt_client_id = "weather-station-1";
+const char* mqtt_weather_report_topic = "weatherreport";
 
-// NTP
-const char* ntp_server = "pool.ntp.org";
-const long utc_offset = 0; // In seconds
+// DHT22
+const int dht_pin = D1; // Digital pin connected to the DHT sensor
+const int dht_read_interval = 30; // In seconds
+```
 
-// Loop
-const long tick_interval = 5; // In seconds
+## MQTT Payload example
 
+```json
+{
+    "stationId":"weather-station-1",
+    "timestamp":"2020-08-13T23:02:49Z",
+    "sensors":[
+        {
+            "type":"temperature",
+            "measurement":24.6,
+            "unit":"C",
+            "timestamp":"2020-08-13T23:02:24Z"
+        },
+        {
+            "type":"humidity",
+            "measurement":50.1,
+            "unit":"%",
+            "timestamp":"2020-08-13T23:02:24Z"
+        }
+    ]
+}
 ```
 
 ## PlatformIO

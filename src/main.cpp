@@ -1,102 +1,213 @@
-#include <Arduino.h>
 #include <ESP8266WiFi.h>
-#include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <Ticker.h>
+#include <DHT.h>
 
-#include <config.hpp>
-#include <log.hpp>
+#include <ntptime.h>
+#include <report.h>
+#include <config.h>
+#include <debug-tools.h>
 
-long tick_start;
+// WiFi client
+WiFiClient wifiClient;
 
-WiFiClient espClient;
-PubSubClient client(espClient);
-long lastMsg = 0;
-char msg[50];
-int value = 0;
+// MQTT client
+PubSubClient mqttClient(wifiClient);
 
-char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+// NTP time client
+WiFiUDP wifiUDP;
+NtpTimeClient timeClient(wifiUDP);
 
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, ntp_server, utc_offset);
+// Temperature and Humidity sensors
+Ticker sensorTicker;
+DHT22 dhtSensor;
+volatile float lastMeasurementTimestamp = 0;
+volatile float measuredHumidity = 0;
+volatile float measuredTemperature = 0;
+volatile int8_t dhtResult = 0;
 
-void setup_wifi() {
-  logln("Starting WiFi setup");
-
-  WiFi.begin(ssid, password);
-
-  logln("Connecting ");
-
-  while (WiFi.status() != WL_CONNECTED)
-  {
-     delay(500);
-     log("*");
-  }
-
-  logln("");
-  log("WiFi connection Successful (");
-  log(WiFi.localIP());
-  logln(")");
+void readDht() {
+  dhtSensor.read();
 }
 
-void reconnect() {
+// This callback will be called from an interrupt
+// It should be short and carry the ICACHE_RAM_ATTR attribute
+void ICACHE_RAM_ATTR handleDhtData(float h, float t) {
+  lastMeasurementTimestamp = timeClient.epochTime();
+  measuredHumidity = h;
+  measuredTemperature = t;
+  dhtResult = 1;
+}
+
+// This callback will be called from an interrupt
+// It should be short and carry the ICACHE_RAM_ATTR attribute
+void ICACHE_RAM_ATTR handleDhtError(uint8_t e) {
+  dhtResult = -1;
+}
+
+void mqttReconnect() {
   // Loop until we're reconnected
-  while (!client.connected()) {
-    log("Attempting MQTT connection...");
+  while (!mqttClient.connected()) {
+    debugLog("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect(client_id)) {
-      logln("connected");
-      // Once connected, publish an announcement...
-      client.publish("outTopic", "hello world");
-      // ... and resubscribe
+    if (mqttClient.connect(mqtt_client_id)) {
+      debugLogLn("connected.");
     } else {
-      log("failed, rc=");
-      log(client.state());
-      logln(" try again in 5 seconds");
+      debugLog("failed, rc=");
+      debugLog(mqttClient.state());
+      debugLogLn(" try again in 5 seconds");
       // Wait 5 seconds before retrying
       delay(5000);
     }
   }
 }
 
-void tick() {
-  log("Ticking...");
-  logln(timeClient.getEpochTime());
+void setupWiFi() {
+  debugLogLn("Starting WiFi.");
 
-  log(daysOfTheWeek[timeClient.getDay()]);
-  log(", ");
-  log(timeClient.getHours());
-  log(":");
-  log(timeClient.getMinutes());
-  log(":");
-  logln(timeClient.getSeconds());
+  WiFi.begin(wifi_ssid, wifi_password);
 
-  if (!client.connected()) {
-    reconnect();
+  debugLogLn("Connecting ");
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+     delay(500);
+     debugLog("*");
   }
 
-  long now = millis();
-  if (now - lastMsg > 2000) { // TODO Check this
-    lastMsg = now;
-    ++value;
-    snprintf (msg, 75, "hello world #%ld", value);
-    log("Publish message: ");
-    logln(msg);
-    client.publish("temperature_topic", msg);
-  }
+  debugLogLn("");
+  debugLog("WiFi connection Successful (");
+  debugLog(WiFi.localIP());
+  debugLogLn(").");
+
 }
 
-void setup() {
-  initLog(serial_port);
-
-  setup_wifi();
+void setupTime() {
+  debugLogLn("Starting timeClient client.");
 
   timeClient.begin();
 
-  client.setServer(mqtt_server, mqtt_port);
+}
 
-  tick_start = timeClient.getEpochTime();
+void setupMqtt() {
+  debugLogLn("Starting mqtt client.");
+
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setBufferSize(mqtt_buffer_size);
+
+  mqttReconnect();
+
+}
+
+void setupSensors() {
+  debugLogLn("Starting sensors polling timer.");
+
+  dhtSensor.setPin(dht_pin);
+  dhtSensor.onData(handleDhtData);
+  dhtSensor.onError(handleDhtError);
+  sensorTicker.attach_scheduled(dht_read_interval, readDht);
+
+}
+
+WeatherReport* generateWeatherRepot(const int temperature, const int humidity) {
+
+  debugLogLn("Creating weather report.");
+
+  Sensor* tempSensor = new Sensor(
+    SensorType::temperature,
+    measuredTemperature,
+    "C",
+    timeClient.isoString(lastMeasurementTimestamp)
+  );
+
+  Sensor* humidSensor = new Sensor(
+    SensorType::humidity,
+    measuredHumidity,
+    "%",
+    timeClient.isoString(lastMeasurementTimestamp)
+  );
+
+  Sensor** sensors = (Sensor**) malloc(sizeof(Sensor*) * 2);
+  sensors[0] = tempSensor;
+  sensors[1] = humidSensor;
+
+  WeatherReport* report = new WeatherReport(
+    mqtt_client_id,
+    timeClient.isoString(),
+    sensors,
+    2
+  );
+
+  debugLogLn("Weather report successfully created.");
+
+  return report;
+}
+
+void sendWeatherReport(const WeatherReport* report) {
+  debugLogLn("Sending weather report.");
+
+  if (!mqttClient.connected()) {
+    mqttReconnect();
+  }
+
+  ReportCommons::Json_t jsonReport = report->toJson();
+  debugLog("Json: ");
+  debugLogLn(jsonReport);
+
+  mqttClient.publish(mqtt_weather_report_topic, jsonReport);
+
+  debugLogLn("Weather report sent.");
+
+  free(jsonReport);
+}
+
+void processDhtResult() {
+  debugLog("Processing DHT result (");
+  debugLog(dhtResult);
+  debugLog(") at ")
+  debugDo(char* isoDateTime = timeClient.isoString());
+  debugLogLn(isoDateTime);
+  debugDo(free(isoDateTime));
+
+  if (dhtResult > 0) {
+    debugLog("Humid: ");
+    debugLog(measuredHumidity);
+    debugLogLn("%.");
+    debugLog("Temp: ");
+    debugLog(measuredTemperature);
+    debugLogLn(" C.");
+
+    WeatherReport* report = generateWeatherRepot(measuredTemperature, measuredHumidity);
+    sendWeatherReport(report);
+
+    delete report;
+
+   } else if (dhtResult < 0) {
+
+     debugLog("Error: ");
+     debugLogLn(dhtSensor.getError());
+
+   }
+
+   dhtResult = 0;
+
+}
+
+void setup() {
+
+  initDebugLog(serial_port);
+
+  debugLogLn("---------------------Setting up---------------------");
+
+  setupWiFi();
+  setupTime();
+  setupMqtt();
+  setupSensors();
+
+  debugLogLn("---------------------Setup finished---------------------");
+  debugLogLn("Looping...");
 
 }
 
@@ -104,21 +215,11 @@ void loop() {
 
   // Process inconming messages and keep alive
   // Should execute regularly (every loop)
-  client.loop();
+  mqttClient.loop();
 
-  // Send update notification to time client
-  // This method only efectivly sends an NTP request every 60 seconds
-  // This can be modified in the constructor
-  timeClient.update();
-
-  // Tick every 'tick_interval' seconds
-  if(timeClient.getEpochTime() - tick_start > tick_interval) {
-    long tick_start = timeClient.getEpochTime();
-    log("Tick start: ");
-    logln(tick_start);
-
-    tick();
-
+  // Process sensor measurement
+  if(dhtResult != 0) {
+    processDhtResult();
   }
 
 }
